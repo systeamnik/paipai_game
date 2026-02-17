@@ -1,0 +1,11 @@
+{
+  "@@locale": "ru",
+  "appTitle": "PaiPai",
+  "score": "Очки",
+  "time": "Время",
+  "level": "Уровень",
+  "shuffle": "Перемешать",
+  "hint": "Подсказка",
+  "gameOver": "Игра окончена",
+  "congratulations": "Поздравляем!"
+}

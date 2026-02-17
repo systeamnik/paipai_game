@@ -1,0 +1,35 @@
+{
+  "@@locale": "en",
+  "appTitle": "PaiPai",
+  "@appTitle": {
+    "description": "App title"
+  },
+  "score": "Score",
+  "@score": {
+    "description": "Score label"
+  },
+  "time": "Time",
+  "@time": {
+    "description": "Time label"
+  },
+  "level": "Level",
+  "@level": {
+    "description": "Level label"
+  },
+  "shuffle": "Shuffle",
+  "@shuffle": {
+    "description": "Shuffle button"
+  },
+  "hint": "Hint",
+  "@hint": {
+    "description": "Hint button"
+  },
+  "gameOver": "Game Over",
+  "@gameOver": {
+    "description": "Game over message"
+  },
+  "congratulations": "Congratulations!",
+  "@congratulations": {
+    "description": "Level completed message"
+  }
+}
