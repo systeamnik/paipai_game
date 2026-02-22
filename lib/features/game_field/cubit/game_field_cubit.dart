@@ -4,7 +4,9 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../../constants/grid_config.dart';
 import '../../../constants/level_config.dart';
+import '../../../constants/shift_mode.dart';
 import '../../../model/game_models/point.dart';
+import '../../../model/game_models/tile.dart';
 import '../../main_menu/service/game_storage_service.dart';
 import 'game_field_state.dart';
 
@@ -19,6 +21,7 @@ import 'game_field_state.dart';
 class GameFieldCubit extends Cubit<GameFieldState> {
   final Random _random = Random();
   final GameStorageService _storage;
+  int _nextTileId = 0;
 
   GameFieldCubit({required GameStorageService storage})
     : _storage = storage,
@@ -35,6 +38,8 @@ class GameFieldCubit extends Cubit<GameFieldState> {
 
     _generateGrid(grid, config);
 
+    final tiles = _tilesFromGrid(grid);
+
     emit(
       GameFieldState(
         status: GameFieldStatus.playing,
@@ -42,6 +47,7 @@ class GameFieldCubit extends Cubit<GameFieldState> {
         score: initialScore,
         remainingTime: config.timeLimit,
         grid: grid,
+        tiles: tiles,
         wasShuffled: false,
       ),
     );
@@ -55,6 +61,7 @@ class GameFieldCubit extends Cubit<GameFieldState> {
   /// Продолжить игру из сохранённого состояния
   void continueFromSaved(int level, int score, List<List<int>> grid) {
     final config = LevelConfig.forLevel(level);
+    final tiles = _tilesFromGrid(grid);
 
     emit(
       GameFieldState(
@@ -63,6 +70,7 @@ class GameFieldCubit extends Cubit<GameFieldState> {
         score: score,
         remainingTime: config.timeLimit,
         grid: grid,
+        tiles: tiles,
         wasShuffled: false,
       ),
     );
@@ -94,12 +102,18 @@ class GameFieldCubit extends Cubit<GameFieldState> {
 
     // Очищаем предыдущий matchPath/hint если есть
     if (state.matchPath != null || state.hintPair != null) {
-      emit(state.copyWith(clearMatchPath: true, clearHintPair: true));
+      emit(
+        state.copyWith(
+          clearMatchPath: true,
+          clearHintPair: true,
+          wasShuffled: false,
+        ),
+      );
     }
 
     // Нет выбранной — запоминаем
     if (state.selectedPos == null) {
-      emit(state.copyWith(selectedPos: tappedPos));
+      emit(state.copyWith(selectedPos: tappedPos, wasShuffled: false));
       return;
     }
 
@@ -107,7 +121,7 @@ class GameFieldCubit extends Cubit<GameFieldState> {
 
     // Тот же тайл — снимаем выделение
     if (firstPos == tappedPos) {
-      emit(state.copyWith(clearSelectedPos: true));
+      emit(state.copyWith(clearSelectedPos: true, wasShuffled: false));
       return;
     }
 
@@ -126,7 +140,7 @@ class GameFieldCubit extends Cubit<GameFieldState> {
     }
 
     // Не совпали или путь не найден — выбираем новую
-    emit(state.copyWith(selectedPos: tappedPos));
+    emit(state.copyWith(selectedPos: tappedPos, wasShuffled: false));
   }
 
   /// Перемешать оставшиеся плитки
@@ -526,22 +540,39 @@ class GameFieldCubit extends Cubit<GameFieldState> {
       ),
     );
 
-    // Фаза 2: Через 400мс убрать плитки и линию
-    Future.delayed(const Duration(milliseconds: 400), () {
+    // Фаза 2: Через 300мс убрать плитки, применить сдвиг и обновить список tiles
+    Future.delayed(const Duration(milliseconds: 300), () {
       if (isClosed) return;
 
-      final newGrid = _copyGrid(state.grid);
+      // Удаляем два совпавших тайла из сетки
+      var newGrid = _copyGrid(state.grid);
       newGrid[first.row][first.col] = 0;
       newGrid[second.row][second.col] = 0;
 
-      final hasAnyTiles = _hasTilesLeft(newGrid);
+      // Удаляем из tiles список (убираем по позиции)
+      final tilesAfterRemoval = state.tiles
+          .where(
+            (t) =>
+                !(t.row == first.row && t.col == first.col) &&
+                !(t.row == second.row && t.col == second.col),
+          )
+          .toList();
+
+      // Применяем смещение (гравитацию)
+      final shiftedGrid = applyShift(newGrid, state.level);
+
+      // Обновляем позиции tile-объектов по новой сетке (сохраняя IDs)
+      final shiftedTiles = _updateTilePositions(tilesAfterRemoval, shiftedGrid);
+
+      final hasAnyTiles = _hasTilesLeft(shiftedGrid);
 
       if (!hasAnyTiles) {
         // Уровень пройден!
         _storage.saveGameState(level: state.level + 1, score: newScore);
         emit(
           state.copyWith(
-            grid: newGrid,
+            grid: shiftedGrid,
+            tiles: shiftedTiles,
             status: GameFieldStatus.completed,
             clearMatchPath: true,
           ),
@@ -549,10 +580,16 @@ class GameFieldCubit extends Cubit<GameFieldState> {
         return;
       }
 
-      emit(state.copyWith(grid: newGrid, clearMatchPath: true));
+      emit(
+        state.copyWith(
+          grid: shiftedGrid,
+          tiles: shiftedTiles,
+          clearMatchPath: true,
+        ),
+      );
 
       // Проверяем тупик
-      if (!_hasAvailableMoves(newGrid)) {
+      if (!_hasAvailableMoves(shiftedGrid)) {
         _shuffleAndEmit();
       }
     });
@@ -603,9 +640,12 @@ class GameFieldCubit extends Cubit<GameFieldState> {
       attempts++;
     }
 
+    final newTiles = _tilesFromGrid(newGrid);
+
     emit(
       state.copyWith(
         grid: newGrid,
+        tiles: newTiles,
         wasShuffled: true,
         clearSelectedPos: true,
         clearMatchPath: true,
@@ -701,7 +741,374 @@ class GameFieldCubit extends Cubit<GameFieldState> {
     }
     return false;
   }
-}
+
+  // ---------------------------------------------------------------------------
+  // TILE LIST HELPERS
+  // ---------------------------------------------------------------------------
+
+  /// Создать список плиток из сетки (при инициализации уровня)
+  /// Каждой плитке присваивается уникальный ID для анимации
+  List<Tile> _tilesFromGrid(List<List<int>> grid) {
+    final tiles = <Tile>[];
+    for (
+      int r = GridConfig.rowOffset;
+      r < GridConfig.rowOffset + GridConfig.physicalRows;
+      r++
+    ) {
+      for (
+        int c = GridConfig.colOffset;
+        c < GridConfig.colOffset + GridConfig.physicalCols;
+        c++
+      ) {
+        if (grid[r][c] > 0) {
+          tiles.add(
+            Tile(id: _nextTileId++, row: r, col: c, tileTypeId: grid[r][c]),
+          );
+        }
+      }
+    }
+    return tiles;
+  }
+
+  /// Обновить координаты плиток по новой сетке, сохраняя IDs
+  /// Сопоставление: совпадение tileTypeId в той же относительной позиции
+  List<Tile> _updateTilePositions(
+    List<Tile> oldTiles,
+    List<List<int>> newGrid,
+  ) {
+    // Собираем новые позиции из сетки по tileTypeId
+    final newPositionsByType = <int, List<_Cell>>{};
+    for (
+      int r = GridConfig.rowOffset;
+      r < GridConfig.rowOffset + GridConfig.physicalRows;
+      r++
+    ) {
+      for (
+        int c = GridConfig.colOffset;
+        c < GridConfig.colOffset + GridConfig.physicalCols;
+        c++
+      ) {
+        final type = newGrid[r][c];
+        if (type > 0) {
+          newPositionsByType.putIfAbsent(type, () => []);
+          newPositionsByType[type]!.add(_Cell(r, c));
+        }
+      }
+    }
+
+    // Для каждого старого тайла найти ближайшую новую позицию того же типа
+    final usedNewPositions = <String>{};
+    final updatedTiles = <Tile>[];
+
+    for (final tile in oldTiles) {
+      final candidates = newPositionsByType[tile.tileTypeId];
+      if (candidates == null || candidates.isEmpty) continue;
+
+      // Найти ближайшую неиспользованную позицию
+      _Cell? best;
+      int bestDist = 999999;
+      for (final candidate in candidates) {
+        final key = '${candidate.row}:${candidate.col}';
+        if (usedNewPositions.contains(key)) continue;
+        final dist =
+            (candidate.row - tile.row).abs() + (candidate.col - tile.col).abs();
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = candidate;
+        }
+      }
+      if (best != null) {
+        final key = '${best.row}:${best.col}';
+        usedNewPositions.add(key);
+        updatedTiles.add(tile.copyWith(row: best.row, col: best.col));
+      }
+    }
+    return updatedTiles;
+  }
+
+  // ---------------------------------------------------------------------------
+  // SHIFT (GRAVITY)
+  // ---------------------------------------------------------------------------
+
+  /// Применить смещение плиток после удаления пары
+  /// Возвращает новую сетку с сдвинутыми значениями
+  List<List<int>> applyShift(List<List<int>> grid, int level) {
+    final mode = shiftModeForLevel(level);
+    if (mode == ShiftMode.none) return grid;
+
+    final newGrid = _createEmptyGrid();
+
+    switch (mode) {
+      case ShiftMode.down:
+        _shiftDown(grid, newGrid);
+      case ShiftMode.up:
+        _shiftUp(grid, newGrid);
+      case ShiftMode.toCenter:
+        _shiftToCenter(grid, newGrid);
+      case ShiftMode.fromCenter:
+        _shiftFromCenter(grid, newGrid);
+      case ShiftMode.left:
+        _shiftLeft(grid, newGrid);
+      case ShiftMode.right:
+        _shiftRight(grid, newGrid);
+      case ShiftMode.splitVertical:
+        _shiftSplitVertical(grid, newGrid);
+      case ShiftMode.splitHorizontal:
+        _shiftSplitHorizontal(grid, newGrid);
+      case ShiftMode.none:
+        return grid;
+    }
+    return newGrid;
+  }
+
+  /// Гравитация вниз: ненулевые значения падают к нижнему краю по каждому столбцу
+  void _shiftDown(List<List<int>> src, List<List<int>> dst) {
+    for (
+      int c = GridConfig.colOffset;
+      c < GridConfig.colOffset + GridConfig.physicalCols;
+      c++
+    ) {
+      final values = <int>[];
+      for (
+        int r = GridConfig.rowOffset;
+        r < GridConfig.rowOffset + GridConfig.physicalRows;
+        r++
+      ) {
+        if (src[r][c] > 0) values.add(src[r][c]);
+      }
+      // Заполняем снизу
+      int ri = GridConfig.rowOffset + GridConfig.physicalRows - 1;
+      for (int i = values.length - 1; i >= 0; i--) {
+        dst[ri][c] = values[i];
+        ri--;
+      }
+    }
+  }
+
+  /// Гравитация вверх
+  void _shiftUp(List<List<int>> src, List<List<int>> dst) {
+    for (
+      int c = GridConfig.colOffset;
+      c < GridConfig.colOffset + GridConfig.physicalCols;
+      c++
+    ) {
+      final values = <int>[];
+      for (
+        int r = GridConfig.rowOffset;
+        r < GridConfig.rowOffset + GridConfig.physicalRows;
+        r++
+      ) {
+        if (src[r][c] > 0) values.add(src[r][c]);
+      }
+      // Заполняем сверху
+      int ri = GridConfig.rowOffset;
+      for (final v in values) {
+        dst[ri][c] = v;
+        ri++;
+      }
+    }
+  }
+
+  /// Стянуть к центру по горизонтали (в каждой строке)
+  /// Левая половина (колонки 1-8) едет вправо к кол. 8,
+  /// правая половина (кол. 9-16) — влево к кол. 9.
+  void _shiftToCenter(List<List<int>> src, List<List<int>> dst) {
+    // midCol = граница: колонки 1-8 (virtual 1-8) и 9-16 (virtual 9-16)
+    final midCol = GridConfig.colOffset + GridConfig.physicalCols ~/ 2;
+
+    for (
+      int r = GridConfig.rowOffset;
+      r < GridConfig.rowOffset + GridConfig.physicalRows;
+      r++
+    ) {
+      // Левая половина: пакуем ВПРАВО к midCol
+      final leftValues = <int>[];
+      for (int c = GridConfig.colOffset; c < midCol; c++) {
+        if (src[r][c] > 0) leftValues.add(src[r][c]);
+      }
+      int ci = midCol - 1;
+      for (int i = leftValues.length - 1; i >= 0; i--) {
+        dst[r][ci] = leftValues[i];
+        ci--;
+      }
+
+      // Правая половина: пакуем ВЛЕВО к midCol
+      final rightValues = <int>[];
+      for (
+        int c = midCol;
+        c < GridConfig.colOffset + GridConfig.physicalCols;
+        c++
+      ) {
+        if (src[r][c] > 0) rightValues.add(src[r][c]);
+      }
+      int ci2 = midCol;
+      for (final v in rightValues) {
+        dst[r][ci2] = v;
+        ci2++;
+      }
+    }
+  }
+
+  /// Раздвинуть от центра к краям (в каждой строке)
+  /// Левая половина (кол. 1-8) едет влево к левому краю,
+  /// правая (кол. 9-16) — вправо к правому краю.
+  void _shiftFromCenter(List<List<int>> src, List<List<int>> dst) {
+    final midCol = GridConfig.colOffset + GridConfig.physicalCols ~/ 2;
+
+    for (
+      int r = GridConfig.rowOffset;
+      r < GridConfig.rowOffset + GridConfig.physicalRows;
+      r++
+    ) {
+      // Левая половина: пакуем к левому краю
+      final leftValues = <int>[];
+      for (int c = GridConfig.colOffset; c < midCol; c++) {
+        if (src[r][c] > 0) leftValues.add(src[r][c]);
+      }
+      int ci = GridConfig.colOffset;
+      for (final v in leftValues) {
+        dst[r][ci] = v;
+        ci++;
+      }
+
+      // Правая половина: пакуем к правому краю
+      final rightValues = <int>[];
+      for (
+        int c = midCol;
+        c < GridConfig.colOffset + GridConfig.physicalCols;
+        c++
+      ) {
+        if (src[r][c] > 0) rightValues.add(src[r][c]);
+      }
+      int ci2 = GridConfig.colOffset + GridConfig.physicalCols - 1;
+      for (int i = rightValues.length - 1; i >= 0; i--) {
+        dst[r][ci2] = rightValues[i];
+        ci2--;
+      }
+    }
+  }
+
+  /// Смещение влево (в каждой строке)
+  void _shiftLeft(List<List<int>> src, List<List<int>> dst) {
+    for (
+      int r = GridConfig.rowOffset;
+      r < GridConfig.rowOffset + GridConfig.physicalRows;
+      r++
+    ) {
+      int ci = GridConfig.colOffset;
+      for (
+        int c = GridConfig.colOffset;
+        c < GridConfig.colOffset + GridConfig.physicalCols;
+        c++
+      ) {
+        if (src[r][c] > 0) {
+          dst[r][ci] = src[r][c];
+          ci++;
+        }
+      }
+    }
+  }
+
+  /// Смещение вправо (в каждой строке)
+  void _shiftRight(List<List<int>> src, List<List<int>> dst) {
+    for (
+      int r = GridConfig.rowOffset;
+      r < GridConfig.rowOffset + GridConfig.physicalRows;
+      r++
+    ) {
+      int ci = GridConfig.colOffset + GridConfig.physicalCols - 1;
+      for (
+        int c = GridConfig.colOffset + GridConfig.physicalCols - 1;
+        c >= GridConfig.colOffset;
+        c--
+      ) {
+        if (src[r][c] > 0) {
+          dst[r][ci] = src[r][c];
+          ci--;
+        }
+      }
+    }
+  }
+
+  /// Уровень 8: верхняя половина столбца падает к центру (строка 4),
+  /// нижняя — всплывает к центру (строка 6), строка 5 — центральная (копируется как есть).
+  void _shiftSplitVertical(List<List<int>> src, List<List<int>> dst) {
+    // 9 строк (нечётное) → центральная строка = rowOffset + 4 = 5 (virtual)
+    final centerRow = GridConfig.rowOffset + GridConfig.physicalRows ~/ 2;
+
+    for (
+      int c = GridConfig.colOffset;
+      c < GridConfig.colOffset + GridConfig.physicalCols;
+      c++
+    ) {
+      // Верхняя часть: строки 1-4 (virtual), пакуем вниз к строке 4
+      final topValues = <int>[];
+      for (int r = GridConfig.rowOffset; r < centerRow; r++) {
+        if (src[r][c] > 0) topValues.add(src[r][c]);
+      }
+      int ri = centerRow - 1; // начинаем с строки 4 (снизу верхней части)
+      for (int i = topValues.length - 1; i >= 0; i--) {
+        dst[ri][c] = topValues[i];
+        ri--;
+      }
+
+      // Центральная строка 5: копируем как есть
+      dst[centerRow][c] = src[centerRow][c];
+
+      // Нижняя часть: строки 6-9 (virtual), пакуем вверх к строке 6
+      final bottomValues = <int>[];
+      for (
+        int r = centerRow + 1;
+        r < GridConfig.rowOffset + GridConfig.physicalRows;
+        r++
+      ) {
+        if (src[r][c] > 0) bottomValues.add(src[r][c]);
+      }
+      int ri2 = centerRow + 1; // начинаем с строки 6 (сверху нижней части)
+      for (final v in bottomValues) {
+        dst[ri2][c] = v;
+        ri2++;
+      }
+    }
+  }
+
+  /// Уровни 9-10: левая половина строки смещается к центру вправо, правая — влево
+  void _shiftSplitHorizontal(List<List<int>> src, List<List<int>> dst) {
+    final midCol = GridConfig.colOffset + GridConfig.physicalCols ~/ 2;
+
+    for (
+      int r = GridConfig.rowOffset;
+      r < GridConfig.rowOffset + GridConfig.physicalRows;
+      r++
+    ) {
+      // Левая половина: прижимаем значения к правому краю (к midCol)
+      final leftValues = <int>[];
+      for (int c = GridConfig.colOffset; c < midCol; c++) {
+        if (src[r][c] > 0) leftValues.add(src[r][c]);
+      }
+      int ci = midCol - 1;
+      for (int i = leftValues.length - 1; i >= 0; i--) {
+        dst[r][ci] = leftValues[i];
+        ci--;
+      }
+
+      // Правая половина: прижимаем значения к левому краю (к midCol)
+      final rightValues = <int>[];
+      for (
+        int c = midCol;
+        c < GridConfig.colOffset + GridConfig.physicalCols;
+        c++
+      ) {
+        if (src[r][c] > 0) rightValues.add(src[r][c]);
+      }
+      int ci2 = midCol;
+      for (final v in rightValues) {
+        dst[r][ci2] = v;
+        ci2++;
+      }
+    }
+  }
+} // end GameFieldCubit
 
 /// Внутренняя вспомогательная структура для позиций
 class _Cell {

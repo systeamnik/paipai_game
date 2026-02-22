@@ -1,6 +1,7 @@
 import 'package:equatable/equatable.dart';
 
 import '../../../model/game_models/point.dart';
+import '../../../model/game_models/tile.dart';
 
 /// Статус игрового поля
 enum GameFieldStatus { initial, playing, paused, completed, gameOver }
@@ -20,13 +21,16 @@ class GameFieldState extends Equatable {
   final int remainingTime;
 
   /// Виртуальная сетка [virtualRows][virtualCols]
-  /// 0 = пусто, >0 = tileTypeId
+  /// 0 = пусто, >0 = tileTypeId (для pathfinding)
   final List<List<int>> grid;
 
-  /// Выбранная позиция (физические координаты)
+  /// Плоский список живых плиток с текущими координатами (для анимированного рендера)
+  final List<Tile> tiles;
+
+  /// Выбранная позиция (виртуальные координаты)
   final GridPoint? selectedPos;
 
-  /// Путь между совпавшими плитками (для анимации линии)
+  /// Путь между совпавшими плитками (для визуальной линии)
   final List<GridPoint>? matchPath;
 
   /// Пара для подсказки
@@ -41,6 +45,7 @@ class GameFieldState extends Equatable {
     this.score = 0,
     this.remainingTime = 300,
     this.grid = const [],
+    this.tiles = const [],
     this.selectedPos,
     this.matchPath,
     this.hintPair,
@@ -48,15 +53,7 @@ class GameFieldState extends Equatable {
   });
 
   /// Количество оставшихся (не удалённых) плиток
-  int get remainingTiles {
-    int count = 0;
-    for (final row in grid) {
-      for (final cell in row) {
-        if (cell > 0) count++;
-      }
-    }
-    return count;
-  }
+  int get remainingTiles => tiles.length;
 
   GameFieldState copyWith({
     GameFieldStatus? status,
@@ -64,6 +61,7 @@ class GameFieldState extends Equatable {
     int? score,
     int? remainingTime,
     List<List<int>>? grid,
+    List<Tile>? tiles,
     GridPoint? selectedPos,
     List<GridPoint>? matchPath,
     List<GridPoint>? hintPair,
@@ -78,6 +76,7 @@ class GameFieldState extends Equatable {
       score: score ?? this.score,
       remainingTime: remainingTime ?? this.remainingTime,
       grid: grid ?? this.grid,
+      tiles: tiles ?? this.tiles,
       selectedPos: clearSelectedPos ? null : (selectedPos ?? this.selectedPos),
       matchPath: clearMatchPath ? null : (matchPath ?? this.matchPath),
       hintPair: clearHintPair ? null : (hintPair ?? this.hintPair),
@@ -92,6 +91,7 @@ class GameFieldState extends Equatable {
     score,
     remainingTime,
     grid,
+    tiles,
     selectedPos,
     matchPath,
     hintPair,
